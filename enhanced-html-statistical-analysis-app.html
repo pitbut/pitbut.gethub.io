@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Расширенный статистический анализ размеров изделий</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/numeric/1.2.6/numeric.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        .container { display: flex; flex-wrap: wrap; }
+        .input-section, .results-section { flex: 1; margin-right: 20px; min-width: 300px; }
+        textarea, input { width: 100%; margin-bottom: 10px; }
+        button { margin-bottom: 10px; }
+        #plot { width: 100%; height: 500px; }
+        #gaussEquation { margin-top: 20px; font-family: monospace; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <h1>Расширенный статистический анализ размеров изделий</h1>
+    <div class="container">
+        <div class="input-section">
+            <h2>Ввод данных</h2>
+            <textarea id="dataInput" rows="10" placeholder="Введите размеры (по одному в строке)"></textarea>
+            <input type="file" id="fileInput" accept=".txt">
+            <br>
+            <input type="number" id="nominalSize" placeholder="Номинальный размер (мм)" step="0.001">
+            <input type="number" id="lowerTolerance" placeholder="Нижний допуск (мм)" step="0.001">
+            <input type="number" id="upperTolerance" placeholder="Верхний допуск (мм)" step="0.001">
+            <input type="number" id="numBins" placeholder="Количество интервалов" value="7">
+            <button onclick="updateAnalysis()">Обновить анализ</button>
+        </div>
+        <div class="results-section">
+            <h2>Результаты анализа</h2>
+            <div id="results"></div>
+            <div id="plot"></div>
+            <div id="gaussEquation"></div>
+        </div>
+    </div>
+
+    <script>
+        function parseInputData(inputText) {
+            return inputText.split(/[\n,;]+/).map(value => parseFloat(value.replace(',', '.'))).filter(num => !isNaN(num));
+        }
+
+        function loadDataFromFile(event) {
+            const file = event.target.files[0];
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById('dataInput').value = e.target.result;
+            };
+            reader.readAsText(file);
+        }
+
+        function updateAnalysis() {
+            const dataInput = document.getElementById('dataInput').value;
+            const data = parseInputData(dataInput);
+
+            if (data.length === 0) {
+                document.getElementById('results').innerHTML = "Ошибка: Не удалось распознать числовые данные.";
+                return;
+            }
+
+            const nominalSize = parseFloat(document.getElementById('nominalSize').value);
+            const lowerTolerance = parseFloat(document.getElementById('lowerTolerance').value);
+            const upperTolerance = parseFloat(document.getElementById('upperTolerance').value);
+            const numBins = parseInt(document.getElementById('numBins').value);
+
+            const mean = data.reduce((sum, value) => sum + value, 0) / data.length;
+            const variance = data.reduce((sum, value) => sum + Math.pow(value - mean, 2), 0) / data.length;
+            const stdDev = Math.sqrt(variance);
+            const cv = (stdDev / mean) * 100;
+
+            const skewness = data.reduce((sum, value) => sum + Math.pow((value - mean) / stdDev, 3), 0) / data.length;
+            const kurtosis = data.reduce((sum, value) => sum + Math.pow((value - mean) / stdDev, 4), 0) / data.length - 3;
+
+            const lowerBound = nominalSize + lowerTolerance;
+            const upperBound = nominalSize + upperTolerance;
+            const toleranceRange = upperBound - lowerBound;
+            const toleranceMiddle = (upperBound + lowerBound) / 2;
+
+            const probDefect = 1 - (normalCDF(upperBound, mean, stdDev) - normalCDF(lowerBound, mean, stdDev));
+            const probDefectUpper = 1 - normalCDF(upperBound, mean, stdDev);
+            const probDefectLower = normalCDF(lowerBound, mean, stdDev);
+
+            const precisionRatio = 6 * stdDev / toleranceRange;
+            const groupingCenterShift = mean - toleranceMiddle;
+
+            const results = `
+                Среднее значение: ${mean.toFixed(6)} мм<br>
+                Стандартное отклонение: ${stdDev.toFixed(6)} мм<br>
+                Дисперсия: ${variance.toFixed(6)} мм²<br>
+                Коэффициент эксцесса: ${kurtosis.toFixed(6)}<br>
+                Коэффициент вариации: ${cv.toFixed(2)}%<br>
+                Коэффициент асимметрии: ${skewness.toFixed(6)}<br>
+                Номинальный размер: ${nominalSize.toFixed(3)} мм<br>
+                Нижний допуск: ${lowerTolerance.toFixed(3)} мм<br>
+                Верхний допуск: ${upperTolerance.toFixed(3)} мм<br>
+                Нижняя граница допуска: ${lowerBound.toFixed(3)} мм<br>
+                Верхняя граница допуска: ${upperBound.toFixed(3)} мм<br>
+                Вероятность брака: ${probDefect.toFixed(6)}<br>
+                Процент годных изделий: ${((1 - probDefect) * 100).toFixed(2)}%<br>
+                Вероятность брака по верхнему пределу (Pes): ${probDefectUpper.toFixed(6)}<br>
+                Вероятность брака по нижнему пределу (Pej): ${probDefectLower.toFixed(6)}<br>
+                Коэффициент точности: ${precisionRatio.toFixed(6)}<br>
+                Смещение центра группирования: ${groupingCenterShift.toFixed(6)} мм<br>
+                <br>
+                ${interpretResults(cv, skewness, kurtosis, precisionRatio, groupingCenterShift, probDefect)}
+            `;
+
+            document.getElementById('results').innerHTML = results;
+
+            // Построение гистограммы и кривой Гаусса
+            const trace1 = {
+                x: data,
+                type: 'histogram',
+                nbinsx: numBins,
+                opacity: 0.7,
+                name: 'Гистограмма'
+            };
+
+            const x = numeric.linspace(Math.min(...data), Math.max(...data), 100);
+            const y = x.map(val => normalPDF(val, mean, stdDev) * data.length * (Math.max(...data) - Math.min(...data)) / numBins);
+
+            const trace2 = {
+                x: x,
+                y: y,
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Кривая Гаусса',
+                line: {color: 'red'}
+            };
+
+            const layout = {
+                title: 'Распределение размеров изделий',
+                xaxis: { title: 'Размер (мм)' },
+                yaxis: { title: 'Частота' },
+                shapes: [
+                    { type: 'line', x0: lowerBound, x1: lowerBound, y0: 0, y1: 1, yref: 'paper', line: { color: 'green', dash: 'dash' } },
+                    { type: 'line', x0: upperBound, x1: upperBound, y0: 0, y1: 1, yref: 'paper', line: { color: 'green', dash: 'dash' } }
+                ]
+            };
+
+            Plotly.newPlot('plot', [trace1, trace2], layout);
+
+            // Отображение уравнения кривой Гаусса
+            const gaussEquation = `f(x) = (1 / (${stdDev.toFixed(4)} * √(2π))) * e^(-(x - ${mean.toFixed(4)})² / (2 * ${stdDev.toFixed(4)}²))`;
+            document.getElementById('gaussEquation').innerHTML = `Уравнение кривой Гаусса:<br>${gaussEquation}`;
+        }
+
+        function normalPDF(x, mean, stdDev) {
+            return Math.exp(-0.5 * Math.pow((x - mean) / stdDev, 2)) / (stdDev * Math.sqrt(2 * Math.PI));
+        }
+
+        function normalCDF(x, mean, stdDev) {
+            return 0.5 * (1 + erf((x - mean) / (stdDev * Math.sqrt(2))));
+        }
+
+        function erf(x) {
+            const a1 =  0.254829592;
+            const a2 = -0.284496736;
+            const a3 =  1.421413741;
+            const a4 = -1.453152027;
+            const a5 =  1.061405429;
+            const p  =  0.3275911;
+
+            const sign = (x < 0) ? -1 : 1;
+            x = Math.abs(x);
+
+            const t = 1.0 / (1.0 + p * x);
+            const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+
+            return sign * y;
+        }
+
+        function interpretResults(cv, skewness, kurtosis, precisionRatio, groupingCenterShift, probDefect) {
+            let conclusion = "";
+
+            if (cv < 5) {
+                conclusion += "Коэффициент вариации низкий, что указывает на стабильный технологический процесс.<br>";
+            } else if (cv < 10) {
+                conclusion += "Коэффициент вариации умеренный, технологический процесс относительно стабилен.<br>";
+            } else {
+                conclusion += "Коэффициент вариации высокий, что указывает на нестабильность технологического процесса.<br>";
+            }
+
+            if (Math.abs(skewness) < 0.5) {
+                conclusion += "Распределение близко к симметричному.<br>";
+            } else if (skewness < 0) {
+                conclusion += "Наблюдается левосторонняя асимметрия (смещение центра группирования влево).<br>";
+            } else {
+                conclusion += "Наблюдается правосторонняя асимметрия (смещение центра группирования вправо).<br>";
+            }
+
+            if (Math.abs(kurtosis) < 0.5) {
+                conclusion += "Форма распределения близка к нормальному.<br>";
+            } else if (kurtosis > 0) {
+                conclusion += "Распределение имеет более острую вершину, чем нормальное.<br>";
+            } else {
+                conclusion += "Распределение имеет более плоскую вершину, чем нормальное.<br>";
+            }
+
+            if (precisionRatio <= 0.75) {
+                conclusion += "Процесс удовлетворяет требованиям точности.<br>";
+            } else {
+                conclusion += "Процесс не удовлетворяет требованиям точности.<br>";
+            }
+
+            if (Math.abs(groupingCenterShift) < 0.1) {
+                conclusion += "Незначительное смещение центра группирования относительно середины поля допуска.<br>";
+            } else {
+                conclusion += `Значительное смещение центра группирования на ${groupingCenterShift.toFixed(3)} мм относительно середины поля допуска.<br>`;
+            }
+
+            if (probDefect < 0.0027) {
+                conclusion += "Процесс хорошо контролируется, вероятность брака низкая.<br>";
+            } else if (probDefect < 0.01) {
+                conclusion += "Процесс удовлетворительный, но требует внимания.<br>";
+            } else {
+                conclusion += "Высокая вероятность брака, требуется корректировка процесса.<br>";
+            }
+
+            return conclusion;
+        }
+
+        document.getElementById('fileInput').addEventListener('change', loadDataFromFile);
+    </script>
+</body>
+</html>
